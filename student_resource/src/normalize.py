@@ -11,7 +11,7 @@ Performance optimization (v2):
   - Abbreviation expansion uses a SINGLE compiled alternation regex + re.sub
     lookup function instead of N sequential .str.replace() passes.
     e.g., 10 name rules + 17 addr rules -> 2 regex passes total (10-17x faster).
-  - Token extraction uses str.findall(r'\w{2,}') — vectorized, no .apply().
+  - Token extraction uses str.findall(r'\\w{2,}') — vectorized, no .apply().
 
 Entry point:
   normalize_sources(df) -> df with added columns:

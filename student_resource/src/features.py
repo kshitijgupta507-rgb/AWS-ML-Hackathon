@@ -485,37 +485,34 @@ def attach_labels(features_df: pd.DataFrame, gt_path: str) -> pd.DataFrame:
     Label = 0  otherwise.
     """
     log.info(f"Attaching labels from {gt_path} ...")
+    t0 = time.time()
     gt_df = pd.read_csv(gt_path, sep="\t", dtype=str)
 
-    # Build ground truth lookup: {source1_entity_id: set(matched_ids)}
-    gt_dict = {}
-    for _, row in gt_df.iterrows():
-        s1 = row["source1_entity_id"]
-        matched = row["matched_entity_ids"]
-        if pd.notna(matched) and matched.strip():
-            gt_dict[s1] = set(m.strip() for m in matched.split(","))
-
+    # Filter to S1 entities present in features_df for efficiency
+    unique_s1 = set(features_df["source1_entity_id"].unique())
+    gt_sub = gt_df[gt_df["source1_entity_id"].isin(unique_s1)].dropna(subset=["matched_entity_ids"])
     del gt_df
 
-    # Vectorized label assignment
-    def _label(s1_id, cand_id):
-        true_set = gt_dict.get(s1_id)
-        if true_set is None:
-            return 0
-        return 1 if cand_id in true_set else 0
+    # Explode ground truth matched pairs for vectorized merge
+    gt_sub = gt_sub[gt_sub["matched_entity_ids"].str.strip() != ""].copy()
+    gt_sub["candidate_entity_id"] = gt_sub["matched_entity_ids"].str.split(",")
+    gt_pairs = gt_sub.explode("candidate_entity_id")[["source1_entity_id", "candidate_entity_id"]]
+    gt_pairs["candidate_entity_id"] = gt_pairs["candidate_entity_id"].str.strip()
+    gt_pairs["label"] = np.int8(1)
+    gt_pairs.drop_duplicates(subset=["source1_entity_id", "candidate_entity_id"], inplace=True)
 
-    vec_label = np.frompyfunc(_label, 2, 1)
-
-    features_df = features_df.copy()
-    features_df["label"] = vec_label(
-        features_df["source1_entity_id"].values,
-        features_df["candidate_entity_id"].values,
-    ).astype(np.int8)
+    # Vectorized left merge
+    features_df = features_df.merge(
+        gt_pairs,
+        on=["source1_entity_id", "candidate_entity_id"],
+        how="left"
+    )
+    features_df["label"] = features_df["label"].fillna(0).astype(np.int8)
 
     n_pos = int(features_df["label"].sum())
     n_total = len(features_df)
     log.info(
-        f"  Labels: {n_pos:,} positive / {n_total:,} total "
+        f"  Labels attached in {time.time()-t0:.2f}s: {n_pos:,} positive / {n_total:,} total "
         f"({n_pos/max(n_total,1):.4%} match rate)"
     )
     return features_df

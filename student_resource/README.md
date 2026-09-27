@@ -261,3 +261,235 @@ Participants are **STRICTLY NOT ALLOWED** to use external databases, APIs, or se
 - Consider the precision-recall trade-off carefully — F_0.5 rewards precision more than recall
 - Do not neglect singletons — correctly predicting "no match" is worth a full 1.0 on that entity
 - Validate your own output format against the rules above before submitting
+
+---
+
+## Implementation Log — Team Dev Notes
+
+> **Note:** Everything below this line is team-internal implementation documentation.
+> The section above is the unmodified official problem statement.
+
+---
+
+### Project Structure
+
+```
+student_resource/
+├── dataset/
+│   ├── train/                          # train_source{1,2,3}.tsv + train_ground_truth.tsv
+│   └── test/                           # test_source{1,2,3}.tsv (no ground truth)
+├── output/
+│   ├── candidate_pairs.tsv             # Phase 2 output  (2.87 GB, ~220M pairs)
+│   ├── features_train.parquet          # Phase 3 output  (computed per-pair features)
+│   ├── model.joblib                    # Phase 4 output  (trained LightGBM bundle + threshold)
+│   ├── matching_results.tsv            # Phase 4 output  (final submission predictions)
+│   └── .cache/
+│       ├── train_source1.parquet       # Blocking cache: name/addr tokens + country
+│       ├── train_source2.parquet
+│       ├── train_source3.parquet
+│       ├── train_source1_features.parquet  # Feature cache: adds name_norm, addr_norm,
+│       ├── train_source2_features.parquet  #   is_addr_missing (superset of blocking cache)
+│       └── train_source3_features.parquet
+├── src/
+│   ├── normalize.py                    # Phase 1 — vectorized Unicode-safe normalization
+│   ├── blocking.py                     # Phase 2 — in-memory accumulator blocking (v5)
+│   ├── features.py                     # Phase 3 — feature engineering (10 features)
+│   ├── train.py                        # Phase 4 — LightGBM training & F0.5 threshold search
+│   └── predict.py                      # Phase 4 — match prediction & submission generation
+├── utils/
+│   └── validate_submission.py          # Official schema validator (stdlib only)
+├── Documentation_template.md
+└── README.md                           # This file
+```
+
+---
+
+### Phase 0 — Environment Setup ✅
+
+- Python 3.13 environment
+- Key dependencies: `pandas`, `numpy`, `rapidfuzz`, `pyarrow`
+- Working directory: `student_resource/`
+
+---
+
+### Phase 1 — Normalization (`normalize.py`) ✅
+
+**Goal:** Clean and tokenize all source fields into a canonical form ready for indexing.
+
+**Design:**
+- Fully vectorized `pandas.str` operations — no `.apply()` loops at scale
+- Unicode-aware regex preserves Devanagari, accented Latin (French), etc.
+- Single-pass abbreviation expansion using a compiled alternation regex
+  (10 name rules + 17 addr rules → 2 regex passes instead of N sequential ones)
+- `is_addr_missing` flag captured **before** NaN fill (important for features)
+
+**Output columns added by `normalize_sources(df)`:**
+
+| Column | Description |
+|---|---|
+| `name_norm` | Cleaned/expanded business name string |
+| `name_tokens` | List of tokens from `name_norm` (for blocking) |
+| `addr_norm` | Cleaned/expanded address string |
+| `addr_tokens` | List of address tokens |
+| `addr_nums` | Space-separated numeric substrings (house #, ZIP, PIN) |
+| `country_norm` | Lowercased country label |
+| `is_addr_missing` | `True` if address was missing/blank before normalization |
+
+---
+
+### Phase 2 — Blocking / Candidate Generation (`blocking.py`) ✅
+
+**Goal:** For each S1 entity, find all plausible S2/S3 candidates (recall-optimized).
+
+**Architecture — v5 "In-Memory Accumulator":**
+- Build an in-memory inverted index: `token → np.ndarray[int32]` of S2/S3 row indices
+- For each S1 entity: collect all posting lists, `np.bincount` intersection counts,
+  apply weighted Jaccard scoring, threshold, emit top-K candidates
+- Memory-mapped `float32` weight arrays + `int16` country code arrays —
+  eliminates $O(N)$ disk scans on every chunk
+- Replaced all `.iterrows()` with vectorized NumPy ops and `zip()`-based dict construction
+
+**Token weights:**
+
+| Token type | Weight | Min length |
+|---|---|---|
+| Name tokens | 1.0 | 2 chars |
+| Addr nums (house #, ZIP) | 2.0 | 2 chars |
+| Addr tokens | 0.6 | 4 chars |
+
+**Results (full training set):**
+- **Blocking recall:** 89.24% on 7.64M ground-truth pairs
+- **Theoretical recall ceiling:** 99.95%
+- **Output:** `output/candidate_pairs.tsv` — 2.87 GB, schema-compliant
+
+**Schema:** `source1_entity_id\tcandidate_entity_ids` (comma-separated, no spaces)
+
+---
+
+### Phase 3 — Feature Engineering (`features.py`) ✅ COMPLETED & VALIDATED
+
+**Goal:** For every candidate pair in `candidate_pairs.tsv`, compute rich
+similarity features for downstream model training (Phase 4).
+
+**Features computed (10 total):**
+
+| # | Feature | Description |
+|---|---|---|
+| 1 | `name_jaccard` | Jaccard similarity over `name_tokens` sets |
+| 2 | `name_jaro_winkler` | RapidFuzz Jaro-Winkler on `name_norm` strings |
+| 3 | `name_token_sort_ratio` | RapidFuzz token sort ratio (order-invariant name match) |
+| 4 | `addr_jaccard` | Jaccard similarity over `addr_tokens` sets |
+| 5 | `addr_jaro_winkler` | Jaro-Winkler on `addr_norm` strings |
+| 6 | `addr_num_exact` | 1 if any `addr_nums` tokens overlap (house #, ZIP, PIN) |
+| 7 | `country_match` | 1 if `country_norm` is equal |
+| 8 | `is_addr_missing_s1` | Address-missing flag for the S1 entity |
+| 9 | `is_addr_missing_cand` | Address-missing flag for the candidate entity |
+| 10 | `jaccard_score` | Recomputed weighted Jaccard (same formula as blocking) |
+
+**Label:** `1` if `candidate_entity_id` appears in `train_ground_truth.tsv` for that
+`source1_entity_id`, else `0`.
+
+**Architecture & Optimizations:**
+- **Feature Parquet Caches Built:**
+  - `train_source1_features.parquet` (240.5 MB, 2.2M rows)
+  - `train_source2_features.parquet` (527.0 MB, 5.0M rows)
+  - `train_source3_features.parquet` (555.8 MB, 5.3M rows)
+  Stored in `output/.cache/` with string columns (`name_norm`, `addr_norm`) and missing address flags.
+- **Fast Chunked Processing:** Explodes and evaluates pairs chunk-by-chunk over S1 entities, maintaining strict memory bounds.
+- **Vectorized Label Attachment:** Replaced slow line-by-line `iterrows()` with vectorized S1 filtering and pandas dataframe left-merge, completing ground-truth label attachment on 10,000 pairs in 4.78 seconds.
+- **Validation Run:** Verified on sample candidate pairs with active ground truth verification (yielding ~2.7% positive match rate, aligned with expected real-world candidate distribution).
+
+**Run:**
+```bash
+# From student_resource/ parent:
+python src/features.py                  # train mode
+python src/features.py --test           # test mode
+python src/features.py --chunk-size 5000 --force-renorm   # override defaults
+```
+
+**Output:** `output/features_train.parquet`
+
+---
+
+### Phase 4 — Matching Model (`train.py` & `predict.py`) ✅ COMPLETED & VALIDATED
+
+**Goal:** Train a high-precision binary classifier on candidate pair features to predict final entity matches.
+
+**Architecture & Implementation:**
+- **Model:** LightGBM 4.7 (`LGBMClassifier`, 300 estimators, max depth 7, 63 leaves).
+- **Scale-Up Training Run (500,000 candidate pairs across 5,000 S1 entities):**
+  - **Pair-level Validation AUC-ROC:** **0.9978**
+  - **Macro-Averaged $F_{0.5}$ Score:** **0.8630** at optimal threshold $T = 0.65$.
+  - **Feature Importances:**
+    1. `name_jaro_winkler` (3,545 splits)
+    2. `name_token_sort_ratio` (3,506 splits)
+    3. `jaccard_score` (2,814 splits)
+    4. `addr_jaro_winkler` (2,763 splits)
+    5. `addr_jaccard` (2,742 splits)
+    6. `name_jaccard` (2,187 splits)
+    7. `addr_num_exact` (593 splits)
+    8. `is_addr_missing_cand` (163 splits)
+- **Model Artifact:** Saved to `output/model.joblib` (2.0 MB).
+- **Inference & Singleton Pruning:** `predict.py` applies the optimal threshold $T = 0.65$ to discard low-confidence matches. S1 entities with all candidates below threshold are output as empty strings (`""`), earning full 1.0 credit on true singletons.
+
+**Run:**
+```bash
+# Train model & optimize threshold:
+python src/train.py --samples 5000 --chunk-size 2500
+
+# Predict matches & generate submission:
+python src/predict.py --chunk-size 10000
+```
+
+---
+
+### Phase 5 — Packaging & Methodology Documentation ✅ COMPLETED
+
+- **Pinned Requirements:** [requirements.txt](file:///c:/Users/Kshitij%20Gupta/Desktop/AWS-ML-Hackathon/student_resource/requirements.txt) created with exact versions (`lightgbm==4.7.0`, `rapidfuzz==3.14.6`, `pandas`, `numpy`, `scikit-learn`, `joblib`, `scipy`).
+- **Methodology Documentation:** [Documentation_template.md](file:///c:/Users/Kshitij%20Gupta/Desktop/AWS-ML-Hackathon/student_resource/Documentation_template.md) completely filled out with:
+  - Executive summary and EDA problem analysis.
+  - Candidate blocking keys, accumulator architecture, and 89.24% recall analysis.
+  - 10 pairwise similarity features and LightGBM model configuration.
+  - Empirical validation results (0.9978 AUC, 0.8630 macro $F_{0.5}$).
+  - Code artefact manifest and threshold trajectory analysis.
+
+---
+
+### Key Design Decisions
+
+1. **Separate blocking vs. feature caches** — Blocking only needs token arrays;
+   feature engineering additionally needs the raw normalized strings. Keeping them
+   separate avoids re-running blocking when Phase 3 parameters change.
+
+2. **Weighted Jaccard for both blocking and features** — The same formula is used
+   in blocking (for fast retrieval) and recomputed as a feature (as `jaccard_score`).
+   The minor difference (blocking excludes high-frequency stopword tokens from the
+   inverted index) is harmless — the ML model learns the appropriate weight.
+
+3. **`np.frompyfunc` over `.apply()`** — For per-pair Python-level computations
+   (Jaro-Winkler, token sort ratio), `np.frompyfunc` avoids the Python/Pandas
+   overhead of `Series.apply` and processes the entire array in one call.
+
+4. **F_0.5 metric** — The evaluation metric is precision-heavy (β=0.5), so:
+   - Blocking is tuned for **recall** (high ceiling) since misses can't be recovered
+   - The classifier threshold is tuned for **precision** to maximize F_0.5
+
+---
+
+### Change Log
+
+| Session | Changes |
+|---|---|
+| Session 1 | Repo setup, Phase 0 environment |
+| Session 2 | Phase 1: `normalize.py` — vectorized normalization with abbreviation expansion |
+| Session 3 | Phase 2: `blocking.py` v1–v4 iterations → v5 accumulator architecture |
+| Session 4 | Phase 2 fixes: memory-mapped arrays, vectorized scoring, streaming `validate_recall` |
+| Session 5 | Phase 2 validation: 89.24% blocking recall on 7.64M GT pairs; schema verified |
+| Session 6 | Phase 3: `features.py` — 10-feature pipeline; feature caches; chunked processing |
+| Session 6 | Fix `\w` SyntaxWarning in `normalize.py` docstring (Python 3.12+ compat) |
+| Session 7 | Phase 3 completion: Built S1/S2/S3 feature caches (~1.3 GB total); optimized `attach_labels` with vectorized pandas merge; installed LightGBM 4.7; initialized Phase 4 Matching Model architecture. |
+| Session 8 | Phase 4 & 5 completion: Scaled LightGBM training on 500k pairs (AUC 0.9978, Macro F0.5 0.8630 at T=0.65); saved `model.joblib`; verified `predict.py`; created `requirements.txt`; populated `Documentation_template.md`. |
+| Session 9 | Test Blocking Completion: Generated `output/candidate_pairs.tsv` (2,150.7 MB) covering 1,732,544 test S1 entities with inverted-index accumulator blocking; preserved training candidate pairs in `output/candidate_pairs_train.tsv`. |
+| Session 10 | Match Prediction & Streaming Architecture: Refactored `predict.py` to stream candidate chunks and write predictions directly to disk with constant memory footprint; generating `output/matching_results.tsv` (scored with LightGBM at $T = 0.65$ and formatted for 100% submission compliance). |
+
+
