@@ -171,13 +171,23 @@ while retaining >=95% of all true matches (blocking recall gate).
   - `candidate_entity_ids`: comma-separated string of candidate IDs (empty string for singletons)
   - Strictly adheres to the official hackathon schema
 
-### Empirical Recall Analysis on Ground Truth (2026-09-27)
+### Empirical Recall Analysis on Ground Truth
   Tested on real ground truth matching pairs:
   - **Country exact match**  : **100.00%** (zero cross-country true matches)
   - **Name token overlap**   : **82.93%**
   - **Addr nums overlap**    : **79.41%**
-  - **Name OR Num overlap**  : **97.50%** (exceeds 95% blocking recall threshold)
-  - **Name OR Num OR Addr**  : **99.95%** (near-perfect recall ceiling)
+  - **Name OR Num overlap**  : **97.50%**
+  - **Name OR Num OR Addr**  : **99.95%** (theoretical recall ceiling)
+
+### Full-Scale Phase 2 Execution Results (2026-09-27)
+  Ran end-to-end over the complete **2.2M x 10.3M** dataset:
+  - **Generated Output**    : `student_resource/output/candidate_pairs.tsv` (**2.87 GB**)
+  - **Total S1 Entities**   : **2,206,821** (100.0% coverage, 1 row per S1 entity)
+  - **Total Ground Truth**  : 7,638,365 true match pairs across 2,083,574 S1 entities
+  - **Retained Candidates** : **6,816,395 true matches** retained within top-100 candidates
+  - **Blocking Recall**     : **89.24%** macro recall across the full 7.64M ground-truth pairs
+  - **Entities with >=1 Match**: **98.09%** (only 39,808 out of 2,083,574 S1 entities missed entirely)
+  - **Candidate Reduction** : Pruned 99.998% of pairwise comparisons ($22.7\text{B} \to \le 220\text{M}$)
 
 ---
 
