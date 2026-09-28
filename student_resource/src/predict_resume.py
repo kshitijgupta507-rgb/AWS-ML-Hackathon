@@ -41,6 +41,58 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def truncate_to_last_newline(file_path: str) -> None:
+    """Truncate file to its last complete newline, removing any trailing partial line."""
+    if not os.path.exists(file_path):
+        return
+    size = os.path.getsize(file_path)
+    if size == 0:
+        return
+
+    with open(file_path, "r+b") as f:
+        pos = size
+        last_newline = -1
+        while pos > 0:
+            read_size = min(pos, 65536)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            idx = chunk.rfind(b"\n")
+            if idx != -1:
+                last_newline = pos + idx
+                break
+
+        if last_newline != -1:
+            if last_newline + 1 < size:
+                log.warning(
+                    f"Truncating partial line at end of {file_path} "
+                    f"({size} -> {last_newline + 1} bytes)"
+                )
+                f.seek(last_newline + 1)
+                f.truncate()
+        else:
+            log.warning(f"No complete newline found in {file_path}; truncating to 0 bytes")
+            f.seek(0)
+            f.truncate()
+
+
+def load_completed_s1_ids(file_path: str) -> set:
+    """Read existing output file and return set of completed S1 IDs from complete lines only."""
+    done_ids = set()
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return done_ids
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        header = f.readline()
+        if not header.startswith("source1_entity_id"):
+            return done_ids
+        for line in f:
+            if line.endswith("\n"):
+                s1_id = line.split("\t", 1)[0].strip()
+                if s1_id:
+                    done_ids.add(s1_id)
+    return done_ids
+
+
 def resume_predictions(
     pairs_path: str,
     model_path: str,
@@ -66,10 +118,10 @@ def resume_predictions(
 
     # --- Figure out which S1 IDs are already done ---
     done_s1_ids = set()
-    if os.path.exists(output_path):
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
         log.info(f"Reading existing results from {output_path} to find resume point ...")
-        for chunk in pd.read_csv(output_path, sep="\t", dtype=str, chunksize=50_000, usecols=["source1_entity_id"]):
-            done_s1_ids.update(chunk["source1_entity_id"].tolist())
+        truncate_to_last_newline(output_path)
+        done_s1_ids = load_completed_s1_ids(output_path)
         log.info(f"Already completed: {len(done_s1_ids):,} S1 entities")
     else:
         log.info("No existing output file found — starting from scratch.")
@@ -83,11 +135,17 @@ def resume_predictions(
     del s2_df, s3_df
     log.info(f"Sources loaded: S1={len(s1_df):,}, Cand={len(cand_df):,}")
 
+    # --- Truncate existing output to last complete newline before append mode & rebuild done_s1_ids ---
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        truncate_to_last_newline(output_path)
+        done_s1_ids = load_completed_s1_ids(output_path)
+
     # --- Determine write mode ---
     write_mode = "a" if done_s1_ids else "w"
     need_header = not done_s1_ids
 
-    n_processed_s1 = len(done_s1_ids)
+    n_initial_done = len(done_s1_ids)
+    n_processed_s1 = n_initial_done
     total_matches = 0
     n_matched_s1 = 0
     n_skipped_chunks = 0
@@ -157,7 +215,7 @@ def resume_predictions(
     del s1_df, cand_df
 
     log.info(f"Resume prediction complete.")
-    log.info(f"  Previously done:   {len(done_s1_ids):,}")
+    log.info(f"  Previously done:   {n_initial_done:,}")
     log.info(f"  Newly processed:   {n_new:,}")
     log.info(f"  Total now:         {n_processed_s1:,}")
     log.info(f"  Skipped chunks:    {n_skipped_chunks:,}")

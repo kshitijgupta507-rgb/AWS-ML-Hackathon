@@ -212,7 +212,7 @@ def train_and_optimize(
     gt_df = pd.read_csv(gt_path, sep="\t", dtype=str)
     val_gt = gt_df[gt_df["source1_entity_id"].isin(val_s1)]
     gt_dict = {
-        row["source1_entity_id"]: set(m.strip() for m in row["matched_entity_ids"].split(","))
+        row["source1_entity_id"]: set(m.strip() for m in row["matched_entity_ids"].split(",") if m.strip())
         for _, row in val_gt.iterrows()
         if pd.notna(row["matched_entity_ids"]) and row["matched_entity_ids"].strip()
     }

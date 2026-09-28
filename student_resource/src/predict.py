@@ -101,6 +101,12 @@ def generate_matches(
                 else:
                     break
 
+            remainder_df = None
+            if limit is not None and limit > 0 and n_processed_s1 + len(chunk_df) > limit:
+                remaining_to_score = limit - n_processed_s1
+                remainder_df = chunk_df.iloc[remaining_to_score:]
+                chunk_df = chunk_df.iloc[:remaining_to_score]
+
             if top_k is not None and top_k > 0:
                 def _trim(c):
                     if not c or pd.isna(c):
@@ -138,6 +144,15 @@ def generate_matches(
                 f"  Processed S1: {n_processed_s1:,} | "
                 f"Matches found so far: {total_matches:,} ({n_matched_s1:,} entities with matches)"
             )
+
+            if remainder_df is not None:
+                if fill_remaining:
+                    for s1_id in remainder_df["source1_entity_id"]:
+                        out_f.write(f"{s1_id}\t\n")
+                    out_f.flush()
+                    n_processed_s1 += len(remainder_df)
+                else:
+                    break
 
     del s1_df, cand_df
 

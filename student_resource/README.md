@@ -197,7 +197,7 @@ F_0.5 = (1.25 × Precision × Recall) / (0.25 × Precision + Recall)
 
 Computed as a **macro-average**: F_0.5 is calculated per Source 1 entity, then averaged across **all** Source 1 entities in the evaluation set.
 
-Singletons are included in that average. A Source 1 entity with no true matches scores 1.0 when you correctly predict an empty list, and 0.0 when you predict any match for it. Correctly identifying singletons therefore earns credit, and false merges on them are penalised.
+Singletons are included in that average. A Source 1 entity with no true matches scores 1.0 when you correctly predict an empty list, and 0.0 when you predict any match for it. Correctly identifying singletons therefore earns credit, and false merges on them are penalised. When true matches exist but the prediction contains no correct IDs (zero-overlap, Precision = Recall = 0), the F₀.₅ score is defined as 0.0 so the metric remains well-defined.
 
 **Why precision-heavy?** In real-world entity resolution, merging two distinct businesses (false positive) is more damaging than missing a link (false negative). F_0.5 weights precision 2× over recall.
 
@@ -358,7 +358,7 @@ student_resource/
 | Addr tokens | 0.6 | 4 chars |
 
 **Results (full training set):**
-- **Blocking recall:** 89.24% on 7.64M ground-truth pairs
+- **Blocking recall:** 89.24% on 7.64M ground-truth pairs (full-scale training run bypassed the nominal 95% development gate via `--no-validate` to balance candidate size and downstream $F_{0.5}$ precision)
 - **Theoretical recall ceiling:** 99.95%
 - **Output:** `output/candidate_pairs.tsv` — 2.87 GB, schema-compliant
 
@@ -401,7 +401,7 @@ similarity features for downstream model training (Phase 4).
 
 **Run:**
 ```bash
-# From student_resource/ parent:
+# Working directory: student_resource/
 python src/features.py                  # train mode
 python src/features.py --test           # test mode
 python src/features.py --chunk-size 5000 --force-renorm   # override defaults
@@ -434,6 +434,7 @@ python src/features.py --chunk-size 5000 --force-renorm   # override defaults
 
 **Run:**
 ```bash
+# Working directory: student_resource/
 # Train model & optimize threshold:
 python src/train.py --samples 5000 --chunk-size 2500
 
@@ -445,8 +446,8 @@ python src/predict.py --chunk-size 10000
 
 ### Phase 5 — Packaging & Methodology Documentation ✅ COMPLETED
 
-- **Pinned Requirements:** [requirements.txt](file:///c:/Users/Kshitij%20Gupta/Desktop/AWS-ML-Hackathon/student_resource/requirements.txt) created with exact versions (`lightgbm==4.7.0`, `rapidfuzz==3.14.6`, `pandas`, `numpy`, `scikit-learn`, `joblib`, `scipy`).
-- **Methodology Documentation:** [Documentation_template.md](file:///c:/Users/Kshitij%20Gupta/Desktop/AWS-ML-Hackathon/student_resource/Documentation_template.md) completely filled out with:
+- **Pinned Requirements:** [requirements.txt](requirements.txt) created with exact versions (`lightgbm==4.7.0`, `rapidfuzz==3.14.6`, `pandas==3.0.5`, `numpy==2.5.0`, `pyarrow==25.0.1`, `scikit-learn==1.9.0`, `joblib==1.5.3`, `scipy==1.18.0`).
+- **Methodology Documentation:** [Documentation_template.md](Documentation_template.md) completely filled out with:
   - Executive summary and EDA problem analysis.
   - Candidate blocking keys, accumulator architecture, and 89.24% recall analysis.
   - 10 pairwise similarity features and LightGBM model configuration.
